@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet';
+import React, { useState, useEffect, useCallback } from 'react';
+import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import { api } from './services/api';
 import { authService } from './services/auth';
 import Login from './components/Login';
@@ -21,7 +21,6 @@ L.Marker.prototype.options.icon = DefaultIcon;
 function App() {
   const [user, setUser] = useState(null);
   const [events, setEvents] = useState([]);
-  const [correlations, setCorrelations] = useState([]);
   const [dashboard, setDashboard] = useState({});
   const [newEvent, setNewEvent] = useState({
     event_type: 'SIGINT',
@@ -32,49 +31,36 @@ function App() {
   });
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    // Check if user is already logged in
-    if (authService.isAuthenticated()) {
-      setUser(authService.getUser());
-      loadAllData();
-      
-      const interval = setInterval(loadAllData, 30000);
-      return () => clearInterval(interval);
-    }
-  }, []);
-
-  const loadAllData = async () => {
-    await loadDashboard();
-    await loadEvents();
-    await loadCorrelations();
-  };
-
-  const loadDashboard = async () => {
+  // Wrap load functions in useCallback to stabilize dependencies
+  const loadDashboard = useCallback(async () => {
     try {
       const response = await api.getDashboard();
-      setDashboard(response);
+      setDashboard(response.data);
     } catch (error) {
       console.error('Failed to load dashboard:', error);
     }
-  };
+  }, []);
 
-  const loadEvents = async () => {
+  const loadEvents = useCallback(async () => {
     try {
-      const eventsData = await api.getEvents();
-      setEvents(eventsData.events || []);
+      const response = await api.getEvents({ limit: 50 });
+      setEvents(response.data);
     } catch (error) {
       console.error('Failed to load events:', error);
     }
-  };
+  }, []);
 
-  const loadCorrelations = async () => {
-    try {
-      const response = await api.getCorrelations();
-      setCorrelations(response.correlations || []);
-    } catch (error) {
-      console.error('Failed to load correlations:', error);
+  const loadAllData = useCallback(async () => {
+    await loadDashboard();
+    await loadEvents();
+  }, [loadDashboard, loadEvents]);
+
+  useEffect(() => {
+    if (authService.isAuthenticated()) {
+      setUser(authService.getUser());
+      loadAllData();
     }
-  };
+  }, [loadAllData]); // Fixed: Added loadAllData to dependencies
 
   const handleLogin = (userData) => {
     setUser(userData);
@@ -85,7 +71,6 @@ function App() {
     authService.logout();
     setUser(null);
     setEvents([]);
-    setCorrelations([]);
     setDashboard({});
   };
 
@@ -110,36 +95,17 @@ function App() {
         confidence: 3
       });
       
-      setTimeout(loadAllData, 1000);
-      alert('🚀 Intelligence event submitted! Correlation engine analyzing...');
+      setTimeout(() => {
+        loadAllData();
+      }, 1000);
+      
+      alert('✅ Intelligence event submitted successfully!');
     } catch (error) {
       console.error('Failed to create event:', error);
-      alert('❌ Failed to submit intelligence event');
+      alert('❌ Failed to submit intelligence event: ' + (error.response?.data?.error || 'Unknown error'));
     } finally {
       setLoading(false);
     }
-  };
-
-  const getEventColor = (eventType) => {
-    return eventType === 'SIGINT' ? '#a02b93' : '#006ebe';
-  };
-
-  const getCorrelationLines = () => {
-    return correlations.map(corr => {
-      const event1 = events.find(e => e.id === corr.event1_id);
-      const event2 = events.find(e => e.id === corr.event2_id);
-      
-      if (event1 && event2) {
-        return {
-          positions: [
-            [event1.latitude, event1.longitude],
-            [event2.latitude, event2.longitude]
-          ],
-          confidence: corr.confidence
-        };
-      }
-      return null;
-    }).filter(Boolean);
   };
 
   const ConfidenceStars = ({ level }) => {
@@ -150,27 +116,42 @@ function App() {
     );
   };
 
-  // Show login screen if no user
+  // Removed unused getEventColor function to fix the second warning
+
+  // Show login if not authenticated
   if (!user) {
     return <Login onLogin={handleLogin} />;
   }
 
   return (
     <div className="App">
-      {/* Enhanced Header */}
+      {/* Enhanced Header with User Info */}
       <header className="app-header">
         <div className="header-content">
-          <h1>🛰️ FUSION CORE - Intelligence Dashboard</h1>
-          <div className="subtitle">Real-time Signal Intelligence & Surveillance Coordination</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+            <div>
+              <h1>🛰️ FUSION CORE - Intelligence Dashboard</h1>
+              <div className="subtitle">Welcome back, {user.full_name || user.username} ({user.role})</div>
+            </div>
+            <button 
+              onClick={handleLogout}
+              style={{
+                background: 'rgba(255,255,255,0.1)',
+                border: '1px solid #475569',
+                color: 'white',
+                padding: '10px 20px',
+                borderRadius: '8px',
+                cursor: 'pointer'
+              }}
+            >
+              🚪 Logout
+            </button>
+          </div>
           
           <div className="dashboard-stats">
             <div className="stat">
               <span className="stat-value">{dashboard.total_events || 0}</span>
               <span className="stat-label">Total Events</span>
-            </div>
-            <div className="stat">
-              <span className="stat-value">{dashboard.total_correlations || 0}</span>
-              <span className="stat-label">Correlations</span>
             </div>
             <div className="stat">
               <span className="stat-value">{dashboard.sigint_events || 0}</span>
@@ -184,12 +165,11 @@ function App() {
               <span className="stat-value">{dashboard.recent_events || 0}</span>
               <span className="stat-label">Last Hour</span>
             </div>
+            <div className="stat">
+              <span className="stat-value">{dashboard.active_users || 1}</span>
+              <span className="stat-label">Active Users</span>
+            </div>
           </div>
-        </div>
-        
-        <div className="user-info">
-          <span>Welcome, {user.username} ({user.role})</span>
-          <button onClick={handleLogout}>Logout</button>
         </div>
       </header>
 
@@ -260,29 +240,21 @@ function App() {
             </form>
           </div>
 
-          {/* Active Correlations Card */}
+          {/* User Info Card */}
           <div className="card">
-            <h3>🔗 Intelligence Correlations ({correlations.length})</h3>
-            <div className="correlations-list">
-              {correlations.slice(0, 6).map(corr => (
-                <div key={`${corr.event1_id}-${corr.event2_id}`} className="correlation-item">
-                  <div className="correlation-header">
-                    <span className="correlation-type">{corr.correlation_type}</span>
-                    <span className="correlation-confidence">
-                      {Math.round(corr.confidence * 100)}% match
-                    </span>
-                  </div>
-                  <div className="correlation-details">
-                    <div>📡 {corr.event1_desc}</div>
-                    <div>🛸 {corr.event2_desc}</div>
-                  </div>
-                </div>
-              ))}
-              {correlations.length === 0 && (
-                <div style={{textAlign: 'center', color: '#718096', padding: '20px'}}>
-                  No correlations detected yet. Submit events to see intelligence patterns.
-                </div>
-              )}
+            <h3>👤 User Information</h3>
+            <div style={{ padding: '15px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+              <p><strong>Username:</strong> {user.username}</p>
+              <p><strong>Role:</strong> <span style={{ 
+                color: user.role === 'admin' ? '#e6116d' : 
+                       user.role === 'supervisor' ? '#0f9ed6' : '#196b23',
+                fontWeight: 'bold'
+              }}>{user.role.toUpperCase()}</span></p>
+              <p><strong>Permissions:</strong> { 
+                user.role === 'admin' ? 'Full System Access' :
+                user.role === 'supervisor' ? 'Event Management + User Oversight' :
+                'Event Creation + Basic Viewing'
+              }</p>
             </div>
           </div>
         </div>
@@ -299,17 +271,6 @@ function App() {
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             />
             
-            {/* Correlation Lines */}
-            {getCorrelationLines().map((line, index) => (
-              <Polyline
-                key={index}
-                positions={line.positions}
-                color={line.confidence > 0.7 ? '#e6116d' : '#e97132'}
-                weight={line.confidence > 0.7 ? 4 : 2}
-                opacity={0.7}
-              />
-            ))}
-            
             {/* Event Markers */}
             {events.map(event => (
               <Marker key={event.id} position={[event.latitude, event.longitude]}>
@@ -322,10 +283,8 @@ function App() {
                     <p>📍 <strong>Location:</strong> {event.latitude.toFixed(4)}, {event.longitude.toFixed(4)}</p>
                     <p>🆔 <strong>Source:</strong> {event.source_id}</p>
                     <p>🎯 <strong>Confidence:</strong> <ConfidenceStars level={event.confidence} /></p>
-                    <p>🕒 <strong>Time:</strong> {new Date(event.timestamp).toLocaleString()}</p>
-                    {event.correlation_count > 0 && (
-                      <p>🔗 <strong>Correlations:</strong> {event.correlation_count} connections</p>
-                    )}
+                    <p>👤 <strong>Created by:</strong> {event.created_by_username}</p>
+                    <p>🕒 <strong>Time:</strong> {new Date(event.created_at).toLocaleString()}</p>
                   </div>
                 </Popup>
               </Marker>
