@@ -125,3 +125,15 @@ button {
   overflow: hidden !important;
   margin: 10px !important;
 }
+
+/* Map Height Fix */
+.leaflet-container {
+  height: 500px !important;
+  width: 100% !important;
+}
+
+.map-panel {
+  height: 500px !important;
+}
+
+
