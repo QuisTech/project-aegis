@@ -321,3 +321,72 @@ app.listen(PORT, () => {
   console.log('📡 WebSocket server on port 8080');
   console.log('🎯 Advanced correlation engine ACTIVE');
 });
+// Authentication endpoints
+const jwt = require('jsonwebtoken');
+const SECRET_KEY = 'fusioncore-secret-key-2024';
+
+// Mock users (same as your Python backend)
+const users = {
+  'admin': {password: 'admin123', role: 'administrator', username: 'admin'},
+  'user': {password: 'user123', role: 'analyst', username: 'user'},
+  'operator': {password: 'operator123', role: 'operator', username: 'operator'}
+};
+
+// Login endpoint
+app.post('/api/auth/login', (req, res) => {
+  const { username, password } = req.body;
+  
+  console.log(`Login attempt: ${username}`);
+  
+  if (username in users && users[username].password === password) {
+    const userData = {
+      username: username,
+      role: users[username].role
+    };
+    
+    const token = jwt.sign({
+      user: userData,
+      exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) // 24 hours
+    }, SECRET_KEY);
+    
+    console.log(`Login successful for: ${username}`);
+    return res.json({
+      success: true,
+      token: token,
+      user: userData
+    });
+  }
+  
+  console.log(`Login failed for: ${username}`);
+  return res.status(401).json({
+    success: false,
+    message: 'Invalid credentials'
+  });
+});
+
+// Token verification middleware
+const tokenRequired = (req, res, next) => {
+  const token = req.headers.authorization;
+  
+  if (!token) {
+    return res.status(401).json({ message: 'Token is missing!' });
+  }
+  
+  try {
+    const cleanToken = token.startsWith('Bearer ') ? token.slice(7) : token;
+    const decoded = jwt.verify(cleanToken, SECRET_KEY);
+    req.user = decoded.user;
+    next();
+  } catch (error) {
+    return res.status(401).json({ message: 'Token is invalid!' });
+  }
+};
+
+// Protect your existing endpoints
+app.get('/api/dashboard', tokenRequired, async (req, res) => {
+  // Your existing dashboard logic here
+});
+
+app.get('/api/events', tokenRequired, async (req, res) => {
+  // Your existing events logic here  
+});
