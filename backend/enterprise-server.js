@@ -35,7 +35,7 @@ app.use('/api/auth', authLimiter);
 app.use('/api/', apiLimiter);
 
 // Database
-const db = new sqlite3.Database('./aegis_enterprise.db');
+const db = new sqlite3.Database(process.env.DB_PATH || './backend/aegis_enterprise.db');
 
 db.serialize(() => {
   // Existing table creation code
