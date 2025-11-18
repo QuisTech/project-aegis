@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "scripts": {
     "build": "cd frontend && npm run build",
-    "install": "cd frontend && npm install"
+    "install": "cd frontend && npm install",
+    "start": "node backend/enterprise-server.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
