@@ -35,7 +35,13 @@ app.use('/api/auth', authLimiter);
 app.use('/api/', apiLimiter);
 
 // Database
-const db = new sqlite3.Database(process.env.DB_PATH || './backend/aegis_enterprise.db');
+// Updated code for Render
+const dbPath = process.env.DB_PATH || '/tmp/aegis_enterprise.db';
+const db = new sqlite3.Database(dbPath, (err) => {
+  if (err) console.error('Failed to open database:', err);
+  else console.log('✅ SQLite DB opened at', dbPath);
+});
+
 
 db.serialize(() => {
   // Existing table creation code
