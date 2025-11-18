@@ -1,16 +1,19 @@
 import axios from 'axios';
 import { authService } from './auth';
 
-const API_BASE = 'http://localhost:5001/api';
+// Use environment variable with fallback for local development
+const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5001/api';
+
+console.log('API Base URL:', API_BASE); // Debug log
 
 const apiClient = axios.create({
   baseURL: API_BASE,
-  timeout: 10000,
+  timeout: 15000, // Increased timeout for production
 });
 
 apiClient.interceptors.request.use(
-  (config) => {
 
+  (config) => {
     const token = authService.token;
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
@@ -35,18 +38,12 @@ export const api = {
   auth: {
     login: (credentials) => apiClient.post('/auth/login', credentials),
   },
-
-  // FIXED: Extract events array from backend response
   getEvents: async (params) => {
     const response = await apiClient.get('/events', { params });
-    return { data: response.data.events };
+    return { data: response.data };
   },
-  
   createEvent: (eventData) => apiClient.post('/events', eventData),
-
-  // FIXED: Direct response for dashboard
   getDashboard: () => apiClient.get('/dashboard'),
-
   getCorrelations: () => apiClient.get('/correlations'),
   healthCheck: () => apiClient.get('/health'),
 };
