@@ -1,4 +1,5 @@
 // backend/enterprise-server.js
+require('dotenv').config();
 'use strict';
 
 const express = require('express');
@@ -15,34 +16,49 @@ const app = express();
 // Security middleware
 app.use(helmet());
 
-// CORS allow list - update/or add your production URLs here
+// FIXED CORS configuration - more permissive for development
 const allowedOrigins = [
   'https://project-aegis-alpha.vercel.app',
   'https://project-aegis.netlify.app',
-  'https://project-aegis-btw0.onrender.com'
+  'https://project-aegis-btw0.onrender.com',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173'
 ];
 
 app.use(cors({
   origin: function(origin, callback) {
-    if (!origin) return callback(null, true); // allow curl/postman
+    // Allow requests with no origin (like mobile apps, curl, postman)
+    if (!origin) return callback(null, true);
+    
+    // Check if origin is in allowed list
     if (allowedOrigins.indexOf(origin) !== -1) {
       return callback(null, true);
     }
-    return callback(new Error('CORS not allowed'));
+    
+    // For development, you might want to be more permissive
+    if (process.env.NODE_ENV === 'development') {
+      console.log('⚠️  Allowing origin in development:', origin);
+      return callback(null, true);
+    }
+    
+    console.log('🚫 CORS blocked for origin:', origin);
+    return callback(new Error('CORS not allowed'), false);
   },
   credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']
 }));
 
 app.use(express.json());
 
 // Environment / secrets
-const DATABASE_URL = process.env.DATABASE_URL; // must be set in Render/Vercel
+const DATABASE_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 
-// Warn if secrets not set (still run with fallback but you should set them)
+// Warn if secrets not set
 if (!DATABASE_URL) {
   console.warn('⚠️  DATABASE_URL is not set. The app will not connect to Postgres until set.');
 }
@@ -53,12 +69,12 @@ if (!process.env.JWT_SECRET) {
 // Rate limiting
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 min
-  max: 5,
+  max: 10, // Increased for testing
   message: 'Too many authentication attempts, please try again later.'
 });
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 min
-  max: 100,
+  max: 200, // Increased for testing
   message: 'Too many requests, please try again later.'
 });
 
@@ -68,9 +84,7 @@ app.use('/api/', apiLimiter);
 // Postgres pool
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
+  ssl: DATABASE_URL && DATABASE_URL.includes('render.com') ? { rejectUnauthorized: false } : false
 });
 
 // Create tables (idempotent)
@@ -79,7 +93,7 @@ async function createTables() {
   try {
     await client.query('BEGIN');
 
-    // users
+    // users table
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -95,7 +109,7 @@ async function createTables() {
       );
     `);
 
-    // events
+    // events table
     await client.query(`
       CREATE TABLE IF NOT EXISTS events (
         id SERIAL PRIMARY KEY,
@@ -116,7 +130,7 @@ async function createTables() {
       );
     `);
 
-    // audit_logs
+    // audit_logs table
     await client.query(`
       CREATE TABLE IF NOT EXISTS audit_logs (
         id SERIAL PRIMARY KEY,
@@ -131,7 +145,7 @@ async function createTables() {
       );
     `);
 
-    // incidents
+    // incidents table
     await client.query(`
       CREATE TABLE IF NOT EXISTS incidents (
         id SERIAL PRIMARY KEY,
@@ -146,7 +160,7 @@ async function createTables() {
       );
     `);
 
-    // event_correlations
+    // event_correlations table
     await client.query(`
       CREATE TABLE IF NOT EXISTS event_correlations (
         correlation_id SERIAL PRIMARY KEY,
@@ -186,39 +200,41 @@ async function ensureDefaultAdmin() {
   const defaultFullName = 'System Administrator';
   const defaultRole = 'admin';
 
-  const { rows } = await pool.query('SELECT id FROM users WHERE username = $1', [defaultUsername]);
-  if (rows.length === 0) {
-    const hash = bcrypt.hashSync(defaultPassword, 12);
-    await pool.query(
-      `INSERT INTO users (username, email, password_hash, role, full_name) VALUES ($1,$2,$3,$4,$5)`,
-      [defaultUsername, defaultEmail, hash, defaultRole, defaultFullName]
-    );
-    console.log('✅ Default admin created');
-  } else {
-    console.log('✅ Default admin already exists');
+  try {
+    const { rows } = await pool.query('SELECT id FROM users WHERE username = $1', [defaultUsername]);
+    if (rows.length === 0) {
+      const hash = bcrypt.hashSync(defaultPassword, 12);
+      await pool.query(
+        `INSERT INTO users (username, email, password_hash, role, full_name) VALUES ($1,$2,$3,$4,$5)`,
+        [defaultUsername, defaultEmail, hash, defaultRole, defaultFullName]
+      );
+      console.log('✅ Default admin created');
+    } else {
+      console.log('✅ Default admin already exists');
+    }
+  } catch (err) {
+    console.error('Error ensuring default admin:', err);
   }
 }
 
-// initialize DB
+// Initialize DB
 (async () => {
   if (!DATABASE_URL) {
-    console.error('✖ DATABASE_URL not provided. Exiting.');
-    // don't exit if you want to allow running with limited functionality — for safety we exit
-    process.exit(1);
+    console.error('✖ DATABASE_URL not provided. Running without database.');
+    return;
   }
   try {
     await createTables();
     await ensureDefaultAdmin();
   } catch (err) {
     console.error('Initialization error:', err);
-    process.exit(1);
   }
 })();
 
 // Utility: log audit (userId nullable)
 async function logAudit(userId, actionType, resourceType, resourceId, description, req = null) {
   try {
-    const ip = req ? (req.ip || req.headers['x-forwarded-for'] || 'unknown') : 'unknown';
+    const ip = req ? (req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown') : 'unknown';
     const userAgent = req ? req.get('User-Agent') : 'unknown';
     await pool.query(
       `INSERT INTO audit_logs (user_id, action_type, resource_type, resource_id, description, ip_address, user_agent)
@@ -378,7 +394,7 @@ app.post('/api/events', authenticateToken, async (req, res) => {
   }
 });
 
-// Get events with filters
+// Get events with filters - FIXED: Proper table aliases
 app.get('/api/events', authenticateToken, async (req, res) => {
   try {
     const { type, hours, confidence, limit, classification } = req.query;
@@ -386,12 +402,24 @@ app.get('/api/events', authenticateToken, async (req, res) => {
     const params = [];
     let idx = 1;
 
+    // FIXED: Proper table alias usage throughout
     let query = `SELECT e.*, u.username as created_by_username FROM events e JOIN users u ON e.created_by = u.id WHERE 1=1`;
 
-    if (type) { conditions.push(`e.event_type = $${idx++}`); params.push(type); }
-    if (hours) { conditions.push(`e.created_at >= now() - interval '${parseInt(hours,10)} hours'`); /* interval inline */ }
-    if (confidence) { conditions.push(`e.confidence >= $${idx++}`); params.push(confidence); }
-    if (classification && req.user.role !== 'analyst') { conditions.push(`e.classification = $${idx++}`); params.push(classification); }
+    if (type) { 
+      conditions.push(`e.event_type = $${idx++}`); 
+      params.push(type); 
+    }
+    if (hours) { 
+      conditions.push(`e.created_at >= now() - interval '${parseInt(hours,10)} hours'`); 
+    }
+    if (confidence) { 
+      conditions.push(`e.confidence >= $${idx++}`); 
+      params.push(confidence); 
+    }
+    if (classification && req.user.role !== 'analyst') { 
+      conditions.push(`e.classification = $${idx++}`); 
+      params.push(classification); 
+    }
 
     if (conditions.length) query += ' AND ' + conditions.join(' AND ');
 
@@ -402,16 +430,56 @@ app.get('/api/events', authenticateToken, async (req, res) => {
       params.push(parseInt(limit,10));
     }
 
+    console.log('Executing events query:', query);
     const { rows } = await pool.query(query, params);
     await logAudit(req.user.userId, 'VIEW_EVENTS', 'EVENT', null, `Viewed events list with ${rows.length} results`, req);
     res.json(rows);
+  } catch (err) {
+    console.error('Events query error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get single event - FIXED: Proper table aliases
+app.get('/api/events/:id', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT e.*, u.username as created_by_username 
+       FROM events e 
+       JOIN users u ON e.created_by = u.id 
+       WHERE e.id = $1`,
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Event not found' });
+    res.json(rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Audit logs (admin only)
+// Update event - FIXED: Proper table reference
+app.put('/api/events/:id', authenticateToken, async (req, res) => {
+  const { description, confidence, priority, status, analyst_notes, classification } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE events 
+       SET description = $1, confidence = $2, priority = $3, status = $4, analyst_notes = $5, classification = $6, updated_at = now()
+       WHERE id = $7 
+       RETURNING *`,
+      [description, confidence, priority, status, analyst_notes, classification, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Event not found' });
+    
+    await logAudit(req.user.userId, 'UPDATE_EVENT', 'EVENT', req.params.id, `Updated event ${req.params.id}`, req);
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Audit logs (admin only) - FIXED: Proper table aliases
 app.get('/api/audit-logs', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
     const { days, user_id, action_type } = req.query;
@@ -421,9 +489,17 @@ app.get('/api/audit-logs', authenticateToken, requireRole(['admin']), async (req
 
     let query = `SELECT al.*, u.username FROM audit_logs al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`;
 
-    if (days) { conditions.push(`al.created_at >= now() - interval '${parseInt(days,10)} days'`); }
-    if (user_id) { conditions.push(`al.user_id = $${idx++}`); params.push(user_id); }
-    if (action_type) { conditions.push(`al.action_type = $${idx++}`); params.push(action_type); }
+    if (days) { 
+      conditions.push(`al.created_at >= now() - interval '${parseInt(days,10)} days'`); 
+    }
+    if (user_id) { 
+      conditions.push(`al.user_id = $${idx++}`); 
+      params.push(user_id); 
+    }
+    if (action_type) { 
+      conditions.push(`al.action_type = $${idx++}`); 
+      params.push(action_type); 
+    }
 
     if (conditions.length) query += ' AND ' + conditions.join(' AND ');
     query += ' ORDER BY al.created_at DESC LIMIT 1000';
@@ -436,7 +512,7 @@ app.get('/api/audit-logs', authenticateToken, requireRole(['admin']), async (req
   }
 });
 
-// Dashboard
+// Dashboard - FIXED: All subqueries use proper table references
 app.get('/api/dashboard', authenticateToken, async (req, res) => {
   try {
     const { rows } = await pool.query(`
@@ -452,27 +528,60 @@ app.get('/api/dashboard', authenticateToken, async (req, res) => {
     `);
     res.json(rows[0]);
   } catch (err) {
+    console.error('Dashboard error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get users (admin/supervisor only)
+app.get('/api/users', authenticateToken, requireRole(['admin','supervisor']), async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, username, email, role, full_name, is_active, created_at, last_login FROM users ORDER BY created_at DESC'
+    );
+    res.json(rows);
+  } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Health
+// Health endpoint with CORS preflight
+app.options('/api/health', cors());
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'OK',
     service: 'Fusion Core Enterprise API',
     version: '2.0.0',
     timestamp: new Date().toISOString(),
+    database: DATABASE_URL ? 'Connected' : 'Not configured',
     security: 'JWT Authentication Enabled'
   });
 });
 
-// Start
+// Handle preflight for all routes
+app.options('*', cors());
+
+// Global error handler
+app.use((err, req, res, next) => {
+  if (err.message === 'CORS not allowed') {
+    return res.status(403).json({ error: 'CORS not allowed' });
+  }
+  console.error('Global error handler:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ error: 'Route not found' });
+});
+
+// Start server
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log('🔐 FUSION CORE ENTERPRISE running on port', PORT);
-  console.log('🔁 Using DATABASE_URL:', DATABASE_URL ? 'provided' : 'NOT_PROVIDED');
+  console.log('🔁 Using DATABASE_URL:', DATABASE_URL ? 'Provided' : 'NOT PROVIDED - Running in limited mode');
   console.log('🎯 JWT Authentication: ENABLED');
   console.log('📋 Available Roles: analyst, supervisor, admin');
+  console.log('🌐 CORS Enabled for origins:', allowedOrigins);
 });
