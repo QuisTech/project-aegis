@@ -2,10 +2,10 @@
   "name": "project-aegis",
   "version": "1.0.0",
   "scripts": {
-    "start": "node backend/enterprise-server.js",
+    "start": "DB_PATH=${DB_PATH:-/tmp/aegis_enterprise.db} node backend/enterprise-server.js",
     "build": "cd frontend && npm run build",
     "install": "cd frontend && npm install",
-    "postinstall": "cd backend && npm rebuild sqlite3 --build-from-source"
+    "postinstall": "npm rebuild sqlite3 --build-from-source"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
