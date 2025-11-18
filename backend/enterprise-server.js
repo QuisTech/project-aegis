@@ -1,34 +1,63 @@
+// backend/enterprise-server.js
+'use strict';
+
 const express = require('express');
 const cors = require('cors');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 
 // Security middleware
 app.use(helmet());
-app.use(cors());
+
+// CORS allow list - update/or add your production URLs here
+const allowedOrigins = [
+  'https://project-aegis-alpha.vercel.app',
+  'https://project-aegis.netlify.app',
+  'https://project-aegis-btw0.onrender.com'
+];
+
+app.use(cors({
+  origin: function(origin, callback) {
+    if (!origin) return callback(null, true); // allow curl/postman
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    }
+    return callback(new Error('CORS not allowed'));
+  },
+  credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+}));
+
 app.use(express.json());
 
-// Environment variables
+// Environment / secrets
+const DATABASE_URL = process.env.DATABASE_URL; // must be set in Render/Vercel
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 
+// Warn if secrets not set (still run with fallback but you should set them)
+if (!DATABASE_URL) {
+  console.warn('⚠️  DATABASE_URL is not set. The app will not connect to Postgres until set.');
+}
+if (!process.env.JWT_SECRET) {
+  console.warn('⚠️  JWT_SECRET is not set. Tokens will be ephemeral across restarts. Set JWT_SECRET in your env.');
+}
+
 // Rate limiting
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
+  windowMs: 15 * 60 * 1000, // 15 min
   max: 5,
   message: 'Too many authentication attempts, please try again later.'
 });
-
 const apiLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000,
+  windowMs: 1 * 60 * 1000, // 1 min
   max: 100,
   message: 'Too many requests, please try again later.'
 });
@@ -36,198 +65,229 @@ const apiLimiter = rateLimit({
 app.use('/api/auth', authLimiter);
 app.use('/api/', apiLimiter);
 
-// Database Configuration
-function getDatabasePath() {
-  // Use environment variable if set
-  if (process.env.DB_PATH) {
-    return process.env.DB_PATH;
+// Postgres pool
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  // If you deploy to services that require SSL, enable the following:
+  // ssl: { rejectUnauthorized: false }
+});
+
+// Create tables (idempotent)
+async function createTables() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // users
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('analyst','supervisor','admin')),
+        full_name TEXT NOT NULL,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+        last_login TIMESTAMP WITH TIME ZONE,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+      );
+    `);
+
+    // events
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS events (
+        id SERIAL PRIMARY KEY,
+        event_type TEXT NOT NULL CHECK(event_type IN ('SIGINT','BUAS','HUMINT','OSINT')),
+        description TEXT NOT NULL,
+        latitude DOUBLE PRECISION NOT NULL,
+        longitude DOUBLE PRECISION NOT NULL,
+        source_id TEXT NOT NULL,
+        confidence INTEGER DEFAULT 1 CHECK(confidence BETWEEN 1 AND 5),
+        priority INTEGER DEFAULT 1 CHECK(priority BETWEEN 1 AND 3),
+        status TEXT DEFAULT 'active' CHECK(status IN ('active','investigating','resolved','false_positive')),
+        created_by INTEGER NOT NULL REFERENCES users(id),
+        assigned_to INTEGER REFERENCES users(id),
+        analyst_notes TEXT,
+        classification TEXT DEFAULT 'UNCLASSIFIED' CHECK(classification IN ('UNCLASSIFIED','CONFIDENTIAL','SECRET','TOP_SECRET')),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+      );
+    `);
+
+    // audit_logs
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        action_type TEXT NOT NULL,
+        resource_type TEXT NOT NULL,
+        resource_id INTEGER,
+        description TEXT NOT NULL,
+        ip_address TEXT,
+        user_agent TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+      );
+    `);
+
+    // incidents
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS incidents (
+        id SERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        severity INTEGER DEFAULT 1 CHECK(severity BETWEEN 1 AND 5),
+        status TEXT DEFAULT 'open' CHECK(status IN ('open','investigating','resolved','closed')),
+        assigned_analyst INTEGER REFERENCES users(id),
+        created_by INTEGER NOT NULL REFERENCES users(id),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+        resolved_at TIMESTAMP WITH TIME ZONE
+      );
+    `);
+
+    // event_correlations
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS event_correlations (
+        correlation_id SERIAL PRIMARY KEY,
+        event1_id INTEGER NOT NULL REFERENCES events(id),
+        event2_id INTEGER NOT NULL REFERENCES events(id),
+        correlation_type TEXT NOT NULL,
+        confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+        correlation_vectors JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+        UNIQUE (event1_id, event2_id)
+      );
+    `);
+
+    // Indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_events_location ON events USING gist (point(latitude, longitude));`).catch(()=>{});
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(created_at);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(created_at);`);
+
+    await client.query('COMMIT');
+    console.log('✅ Postgres tables ensured');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('❌ Error creating tables:', err);
+    throw err;
+  } finally {
+    client.release();
   }
-  
-  // For production environments (Render, Vercel, etc.)
-  if (process.env.NODE_ENV === 'production') {
-    // Try different writable directories
-    const possiblePaths = [
-      '/tmp/aegis_enterprise.db',
-      '/var/tmp/aegis_enterprise.db',
-      './aegis_enterprise.db'
-    ];
-    
-    for (const dbPath of possiblePaths) {
-      try {
-        const dir = path.dirname(dbPath);
-        // Try to create directory if it doesn't exist
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
-        // Test if we can write to this location
-        fs.accessSync(dir, fs.constants.W_OK);
-        console.log(`✅ Using database path: ${dbPath}`);
-        return dbPath;
-      } catch (error) {
-        console.log(`❌ Cannot use path ${dbPath}: ${error.message}`);
-        continue;
-      }
-    }
+}
+
+// Ensure default admin exists
+async function ensureDefaultAdmin() {
+  const defaultUsername = 'admin';
+  const defaultEmail = 'admin@fusioncore.gov';
+  const defaultPassword = 'admin123';
+  const defaultFullName = 'System Administrator';
+  const defaultRole = 'admin';
+
+  const { rows } = await pool.query('SELECT id FROM users WHERE username = $1', [defaultUsername]);
+  if (rows.length === 0) {
+    const hash = bcrypt.hashSync(defaultPassword, 12);
+    await pool.query(
+      `INSERT INTO users (username, email, password_hash, role, full_name) VALUES ($1,$2,$3,$4,$5)`,
+      [defaultUsername, defaultEmail, hash, defaultRole, defaultFullName]
+    );
+    console.log('✅ Default admin created');
+  } else {
+    console.log('✅ Default admin already exists');
   }
-  
-  // Default local development path
-  return './backend/aegis_enterprise.db';
 }
 
-const dbPath = getDatabasePath();
-console.log(`📁 Final database path: ${dbPath}`);
+// initialize DB
+(async () => {
+  if (!DATABASE_URL) {
+    console.error('✖ DATABASE_URL not provided. Exiting.');
+    // don't exit if you want to allow running with limited functionality — for safety we exit
+    process.exit(1);
+  }
+  try {
+    await createTables();
+    await ensureDefaultAdmin();
+  } catch (err) {
+    console.error('Initialization error:', err);
+    process.exit(1);
+  }
+})();
 
-// Initialize database with error handling and retry
-function initializeDatabase() {
-  const db = new sqlite3.Database(dbPath, (err) => {
-    if (err) {
-      console.error('❌ Failed to open database:', err.message);
-      console.log('🔄 Retrying with in-memory database as fallback...');
-      
-      // Fallback to in-memory database
-      const fallbackDb = new sqlite3.Database(':memory:', (fallbackErr) => {
-        if (fallbackErr) {
-          console.error('❌ Critical: Cannot open any database:', fallbackErr.message);
-          process.exit(1);
-        }
-        console.log('✅ Using in-memory database as fallback');
-        setupDatabase(fallbackDb);
-      });
-      return fallbackDb;
-    } else {
-      console.log('✅ SQLite DB opened successfully at:', dbPath);
-      setupDatabase(db);
-    }
-  });
-  return db;
+// Utility: log audit (userId nullable)
+async function logAudit(userId, actionType, resourceType, resourceId, description, req = null) {
+  try {
+    const ip = req ? (req.ip || req.headers['x-forwarded-for'] || 'unknown') : 'unknown';
+    const userAgent = req ? req.get('User-Agent') : 'unknown';
+    await pool.query(
+      `INSERT INTO audit_logs (user_id, action_type, resource_type, resource_id, description, ip_address, user_agent)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [userId || null, actionType, resourceType, resourceId, description, ip, userAgent]
+    );
+  } catch (err) {
+    console.warn('⚠️ audit log failed:', err.message);
+  }
 }
 
-function setupDatabase(database) {
-  database.serialize(() => {
-    // Existing table creation code
-    database.run(`CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('analyst', 'supervisor', 'admin')),
-      full_name TEXT NOT NULL,
-      is_active INTEGER DEFAULT 1,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_login DATETIME,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // ... all other table creations here ...
-
-    // Ensure default admin exists after tables are created
-    const defaultUsername = 'admin';
-    const defaultEmail = 'admin@fusioncore.gov';
-    const defaultPasswordHash = bcrypt.hashSync('admin123', 12);
-    const defaultFullName = 'System Administrator';
-    const defaultRole = 'admin';
-
-    database.get(`SELECT id FROM users WHERE username = ?`, [defaultUsername], (err, row) => {
-      if (err) {
-        console.error('Failed to query users table for default admin:', err);
-        return;
-      }
-
-      if (!row) {
-        database.run(`INSERT INTO users (username, email, password_hash, role, full_name)
-                VALUES (?, ?, ?, ?, ?)`,
-                [defaultUsername, defaultEmail, defaultPasswordHash, defaultRole, defaultFullName],
-                (err) => {
-                  if (err) console.error('Failed to create default admin:', err);
-                  else console.log('✅ Default admin user created for this deployment.');
-                });
-      } else {
-        console.log('✅ Default admin already exists.');
-      }
-    });
-  });
-}
-
-const db = initializeDatabase();
-
-// Audit logging (allow null userId)
-const logAudit = (userId, actionType, resourceType, resourceId, description, req = null) => {
-  const ip = req ? req.ip : 'unknown';
-  const userAgent = req ? req.get('User-Agent') : 'unknown';
-  
-  db.run(`INSERT INTO audit_logs (user_id, action_type, resource_type, resource_id, description, ip_address, user_agent) 
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [userId || null, actionType, resourceType, resourceId, description, ip, userAgent]);
-};
-
-// JWT middleware
-const authenticateToken = (req, res, next) => {
+// AUTH middleware
+function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-
   if (!token) {
-    logAudit(null, 'UNAUTHENTICATED_ACCESS', 'API', null, 'Attempted access without token', req);
+    logAudit(null, 'UNAUTHENTICATED_ACCESS', 'API', null, 'Attempted access without token', req).catch(()=>{});
     return res.status(401).json({ error: 'Access token required' });
   }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) {
-      logAudit(null, 'INVALID_TOKEN', 'API', null, 'Invalid JWT token provided', req);
+      logAudit(null, 'INVALID_TOKEN', 'API', null, 'Invalid JWT token provided', req).catch(()=>{});
       return res.status(403).json({ error: 'Invalid or expired token' });
     }
-    req.user = user;
+    // Put normalized user object on req
+    req.user = {
+      userId: decoded.userId,
+      username: decoded.username,
+      role: decoded.role,
+      email: decoded.email
+    };
     next();
   });
-};
+}
 
-// Role check middleware
-const requireRole = (roles) => {
+function requireRole(roles) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
     if (!roles.includes(req.user.role)) {
-      logAudit(req.user.userId, 'UNAUTHORIZED_ACCESS', 'API', null, 
-               `User ${req.user.username} attempted to access restricted endpoint`, req);
+      logAudit(req.user.userId, 'UNAUTHORIZED_ACCESS', 'API', null, `User ${req.user.username} attempted to access restricted endpoint`, req).catch(()=>{});
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
     next();
   };
-};
+}
 
-// --- AUTHENTICATION ENDPOINT ---
+// ROUTES
+
+// Login
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
+  console.log('🔐 Login attempt for', username);
+  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
-  console.log(`🔐 Login attempt for user: ${username}`);
-  
-  if (!username || !password) {
-    console.log('❌ Missing username or password');
-    return res.status(400).json({ error: 'Username and password required' });
-  }
-
-  db.get('SELECT * FROM users WHERE username = ? AND is_active = 1', [username], async (err, user) => {
-    if (err) {
-      console.error('❌ Database error during login:', err);
-      return res.status(500).json({ error: 'Internal server error' });
-    }
-
-    if (!user) {
-      console.log(`❌ User not found: ${username}`);
-      logAudit(null, 'FAILED_LOGIN', 'USER', null, `Failed login attempt for username: ${username}`, req);
+  try {
+    const { rows } = await pool.query('SELECT * FROM users WHERE username=$1 AND is_active=true', [username]);
+    if (rows.length === 0) {
+      await logAudit(null, 'FAILED_LOGIN', 'USER', null, `Failed login attempt for username: ${username}`, req);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    console.log(`✅ User found: ${user.username}, role: ${user.role}`);
-
+    const user = rows[0];
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) {
-      console.log(`❌ Invalid password for user: ${user.username}`);
-      logAudit(user.id, 'FAILED_LOGIN', 'USER', null, `Failed login attempt for user: ${user.username}`, req);
+      await logAudit(user.id, 'FAILED_LOGIN', 'USER', null, `Failed login attempt for user: ${user.username}`, req);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    console.log(`✅ Password valid for user: ${user.username}`);
-
-    db.run('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', [user.id]);
+    // update last_login
+    await pool.query('UPDATE users SET last_login = now() WHERE id=$1', [user.id]);
 
     const token = jwt.sign(
       { userId: user.id, username: user.username, role: user.role, email: user.email },
@@ -235,11 +295,9 @@ app.post('/api/auth/login', async (req, res) => {
       { expiresIn: JWT_EXPIRES_IN }
     );
 
-    logAudit(user.id, 'LOGIN', 'USER', user.id, `User ${user.username} logged in successfully`, req);
+    await logAudit(user.id, 'LOGIN', 'USER', user.id, `User ${user.username} logged in successfully`, req);
 
-    console.log(`🎉 Successful login for: ${user.username}`);
-    
-    res.json({
+    return res.json({
       token,
       user: {
         id: user.id,
@@ -249,119 +307,156 @@ app.post('/api/auth/login', async (req, res) => {
         full_name: user.full_name
       }
     });
-  });
+
+  } catch (err) {
+    console.error('Login error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-// --- USER MANAGEMENT ENDPOINTS ---
-app.get('/api/users/me', authenticateToken, (req, res) => {
-  db.get('SELECT id, username, email, role, full_name, created_at, last_login FROM users WHERE id = ?', 
-         [req.user.userId], (err, user) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    res.json({ user });
-  });
+// Get current user
+app.get('/api/users/me', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT id, username, email, role, full_name, created_at, last_login FROM users WHERE id=$1', [req.user.userId]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ user: rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
-app.post('/api/users', authenticateToken, requireRole(['admin', 'supervisor']), async (req, res) => {
+// Create user (admin/supervisor)
+app.post('/api/users', authenticateToken, requireRole(['admin','supervisor']), async (req, res) => {
   const { username, email, password, role, full_name } = req.body;
   if (!username || !email || !password || !role || !full_name) return res.status(400).json({ error: 'All fields are required' });
 
   try {
-    const passwordHash = await bcrypt.hash(password, 12);
-    
-    db.run(`INSERT INTO users (username, email, password_hash, role, full_name) 
-            VALUES (?, ?, ?, ?, ?)`,
-            [username, email, passwordHash, role, full_name], 
-            function(err) {
-      if (err) {
-        if (err.message.includes('UNIQUE constraint failed')) return res.status(400).json({ error: 'Username or email already exists' });
-        return res.status(500).json({ error: 'Failed to create user' });
-      }
-      logAudit(req.user.userId, 'CREATE_USER', 'USER', this.lastID, `Created user: ${username} with role: ${role}`, req);
-      res.status(201).json({ message: 'User created successfully', user_id: this.lastID });
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Internal server error' });
+    const password_hash = await bcrypt.hash(password, 12);
+    const { rows } = await pool.query(
+      `INSERT INTO users (username, email, password_hash, role, full_name) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [username, email, password_hash, role, full_name]
+    );
+    await logAudit(req.user.userId, 'CREATE_USER', 'USER', rows[0].id, `Created user: ${username} with role: ${role}`, req);
+    res.status(201).json({ message: 'User created successfully', user_id: rows[0].id });
+  } catch (err) {
+    if (err.code === '23505') { // unique_violation
+      return res.status(400).json({ error: 'Username or email already exists' });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Failed to create user' });
   }
 });
 
-// --- EVENT ENDPOINTS ---
-app.post('/api/events', authenticateToken, (req, res) => {
+// Create event
+app.post('/api/events', authenticateToken, async (req, res) => {
   const { event_type, description, latitude, longitude, source_id, confidence, priority, classification } = req.body;
-  if (!event_type || !description || latitude === undefined || longitude === undefined) 
-    return res.status(400).json({ error: 'Missing required fields' });
+  if (!event_type || !description || latitude === undefined || longitude === undefined) return res.status(400).json({ error: 'Missing required fields' });
 
-  db.run(`INSERT INTO events (event_type, description, latitude, longitude, source_id, confidence, priority, classification, created_by) 
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [event_type, description, latitude, longitude, source_id, confidence || 1, priority || 1, classification || 'UNCLASSIFIED', req.user.userId],
-          function(err) {
-    if (err) return res.status(500).json({ error: 'Failed to create event' });
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO events (event_type, description, latitude, longitude, source_id, confidence, priority, classification, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, created_at`,
+      [event_type, description, latitude, longitude, source_id, confidence || 1, priority || 1, classification || 'UNCLASSIFIED', req.user.userId]
+    );
 
     const newEvent = {
-      id: this.lastID, event_type, description, latitude, longitude, source_id,
-      confidence: confidence || 1, priority: priority || 1,
-      classification: classification || 'UNCLASSIFIED', created_by: req.user.userId,
-      timestamp: new Date().toISOString()
+      id: rows[0].id,
+      event_type, description, latitude, longitude, source_id,
+      confidence: confidence || 1, priority: priority || 1, classification: classification || 'UNCLASSIFIED',
+      created_by: req.user.userId,
+      timestamp: rows[0].created_at
     };
 
-    logAudit(req.user.userId, 'CREATE_EVENT', 'EVENT', this.lastID, `Created ${event_type} event: ${description.substring(0,50)}...`, req);
+    await logAudit(req.user.userId, 'CREATE_EVENT', 'EVENT', newEvent.id, `Created ${event_type} event: ${description.substring(0,50)}...`, req);
     res.json(newEvent);
-  });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to create event' });
+  }
 });
 
-app.get('/api/events', authenticateToken, (req, res) => {
-  const { type, hours, confidence, limit, classification } = req.query;
-  let query = `SELECT e.*, u.username as created_by_username FROM events e JOIN users u ON e.created_by = u.id WHERE 1=1`;
-  const params = [];
+// Get events with filters
+app.get('/api/events', authenticateToken, async (req, res) => {
+  try {
+    const { type, hours, confidence, limit, classification } = req.query;
+    const conditions = [];
+    const params = [];
+    let idx = 1;
 
-  if (type) { query += ' AND e.event_type=?'; params.push(type); }
-  if (hours) { query += ' AND e.created_at >= datetime("now", ?)'; params.push(`-${hours} hours`); }
-  if (confidence) { query += ' AND e.confidence >= ?'; params.push(confidence); }
-  if (classification && req.user.role !== 'analyst') { query += ' AND e.classification=?'; params.push(classification); }
+    let query = `SELECT e.*, u.username as created_by_username FROM events e JOIN users u ON e.created_by = u.id WHERE 1=1`;
 
-  query += ' ORDER BY e.created_at DESC';
-  if (limit) { query += ' LIMIT ?'; params.push(limit); }
+    if (type) { conditions.push(`e.event_type = $${idx++}`); params.push(type); }
+    if (hours) { conditions.push(`e.created_at >= now() - interval '${parseInt(hours,10)} hours'`); /* interval inline */ }
+    if (confidence) { conditions.push(`e.confidence >= $${idx++}`); params.push(confidence); }
+    if (classification && req.user.role !== 'analyst') { conditions.push(`e.classification = $${idx++}`); params.push(classification); }
 
-  db.all(query, params, (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    logAudit(req.user.userId, 'VIEW_EVENTS', 'EVENT', null, `Viewed events list with ${rows.length} results`, req);
+    if (conditions.length) query += ' AND ' + conditions.join(' AND ');
+
+    query += ' ORDER BY e.created_at DESC';
+
+    if (limit) {
+      query += ` LIMIT $${idx++}`;
+      params.push(parseInt(limit,10));
+    }
+
+    const { rows } = await pool.query(query, params);
+    await logAudit(req.user.userId, 'VIEW_EVENTS', 'EVENT', null, `Viewed events list with ${rows.length} results`, req);
     res.json(rows);
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// --- AUDIT LOGS (admin only) ---
-app.get('/api/audit-logs', authenticateToken, requireRole(['admin']), (req, res) => {
-  const { days, user_id, action_type } = req.query;
-  let query = `SELECT al.*, u.username FROM audit_logs al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`;
-  const params = [];
-  if (days) { query += ' AND al.created_at >= datetime("now", ?)'; params.push(`-${days} days`); }
-  if (user_id) { query += ' AND al.user_id=?'; params.push(user_id); }
-  if (action_type) { query += ' AND al.action_type=?'; params.push(action_type); }
-  query += ' ORDER BY al.created_at DESC LIMIT 1000';
+// Audit logs (admin only)
+app.get('/api/audit-logs', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const { days, user_id, action_type } = req.query;
+    const conditions = [];
+    const params = [];
+    let idx = 1;
 
-  db.all(query, params, (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
+    let query = `SELECT al.*, u.username FROM audit_logs al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`;
+
+    if (days) { conditions.push(`al.created_at >= now() - interval '${parseInt(days,10)} days'`); }
+    if (user_id) { conditions.push(`al.user_id = $${idx++}`); params.push(user_id); }
+    if (action_type) { conditions.push(`al.action_type = $${idx++}`); params.push(action_type); }
+
+    if (conditions.length) query += ' AND ' + conditions.join(' AND ');
+    query += ' ORDER BY al.created_at DESC LIMIT 1000';
+
+    const { rows } = await pool.query(query, params);
     res.json(rows);
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// --- DASHBOARD ---
-app.get('/api/dashboard', authenticateToken, (req, res) => {
-  db.all(`
-    SELECT 
-      (SELECT COUNT(*) FROM events) as total_events,
-      (SELECT COUNT(*) FROM events WHERE event_type='SIGINT') as sigint_events,
-      (SELECT COUNT(*) FROM events WHERE event_type='BUAS') as buas_events,
-      (SELECT COUNT(*) FROM events WHERE datetime(created_at) >= datetime('now','-1 hour')) as recent_events,
-      (SELECT COUNT(*) FROM users WHERE is_active=1) as active_users,
-      (SELECT COUNT(*) FROM audit_logs WHERE datetime(created_at) >= datetime('now','-24 hours')) as daily_audits,
-      (SELECT COUNT(*) FROM events WHERE confidence>=4) as high_confidence_events
-  `, [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
+// Dashboard
+app.get('/api/dashboard', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM events) as total_events,
+        (SELECT COUNT(*) FROM event_correlations) as total_correlations,
+        (SELECT COUNT(*) FROM events WHERE event_type = 'SIGINT') as sigint_events,
+        (SELECT COUNT(*) FROM events WHERE event_type = 'BUAS') as buas_events,
+        (SELECT COUNT(*) FROM events WHERE created_at >= now() - interval '1 hour') as recent_events,
+        (SELECT COUNT(*) FROM users WHERE is_active = true) as active_users,
+        (SELECT COUNT(*) FROM audit_logs WHERE created_at >= now() - interval '24 hours') as daily_audits,
+        (SELECT COUNT(*) FROM events WHERE confidence >= 4) as high_confidence_events
+    `);
     res.json(rows[0]);
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// --- HEALTH ---
+// Health
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'OK',
@@ -372,17 +467,11 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// --- START SERVER ---
+// Start
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log('🔐 FUSION CORE ENTERPRISE running on port', PORT);
+  console.log('🔁 Using DATABASE_URL:', DATABASE_URL ? 'provided' : 'NOT_PROVIDED');
   console.log('🎯 JWT Authentication: ENABLED');
-  console.log('📊 Role-Based Access Control: ACTIVE');
-  console.log('📝 Audit Logging: ENABLED');
-  console.log('🚀 Rate Limiting: ACTIVE');
-  console.log('💂 Security Headers: ENABLED\n');
-  console.log('🔑 Default Admin Credentials:');
-  console.log('   Username: admin');
-  console.log('   Password: admin123\n');
   console.log('📋 Available Roles: analyst, supervisor, admin');
 });
