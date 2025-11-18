@@ -17,9 +17,9 @@ class AuthService {
 
   async login(username, password) {
     try {
-      console.log('Attempting login to:', `${API_BASE}/auth/login`); // Debug log
+      console.log('Attempting login to:', `${API_BASE}/api/auth/login`); // Debug log
       
-      const response = await axios.post(`${API_BASE}/auth/login`, {
+      const response = await axios.post(`${API_BASE}/api/auth/login`, {
         username,
         password
       });

@@ -36,14 +36,14 @@ apiClient.interceptors.response.use(
 
 export const api = {
   auth: {
-    login: (credentials) => apiClient.post('/auth/login', credentials),
+    login: (credentials) => apiClient.post('/api/auth/login', credentials),
   },
   getEvents: async (params) => {
-    const response = await apiClient.get('/events', { params });
+    const response = await apiClient.get('/api/events', { params });
     return { data: response.data };
   },
-  createEvent: (eventData) => apiClient.post('/events', eventData),
-  getDashboard: () => apiClient.get('/dashboard'),
-  getCorrelations: () => apiClient.get('/correlations'),
-  healthCheck: () => apiClient.get('/health'),
+  createEvent: (eventData) => apiClient.post('/api/events', eventData),
+  getDashboard: () => apiClient.get('/api/dashboard'),
+  getCorrelations: () => apiClient.get('/api/correlations'),
+  healthCheck: () => apiClient.get('/api/health'),
 };
