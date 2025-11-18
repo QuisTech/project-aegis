@@ -68,8 +68,9 @@ app.use('/api/', apiLimiter);
 // Postgres pool
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  // If you deploy to services that require SSL, enable the following:
-  // ssl: { rejectUnauthorized: false }
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
 // Create tables (idempotent)
