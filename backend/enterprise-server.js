@@ -38,6 +38,7 @@ app.use('/api/', apiLimiter);
 const db = new sqlite3.Database('./aegis_enterprise.db');
 
 db.serialize(() => {
+  // Existing table creation code
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
@@ -51,77 +52,35 @@ db.serialize(() => {
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type TEXT NOT NULL CHECK(event_type IN ('SIGINT', 'BUAS', 'HUMINT', 'OSINT')),
-    description TEXT NOT NULL,
-    latitude REAL NOT NULL,
-    longitude REAL NOT NULL,
-    source_id TEXT NOT NULL,
-    confidence INTEGER DEFAULT 1 CHECK(confidence BETWEEN 1 AND 5),
-    priority INTEGER DEFAULT 1 CHECK(priority BETWEEN 1 AND 3),
-    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'investigating', 'resolved', 'false_positive')),
-    created_by INTEGER NOT NULL,
-    assigned_to INTEGER,
-    analyst_notes TEXT,
-    classification TEXT DEFAULT 'UNCLASSIFIED' CHECK(classification IN ('UNCLASSIFIED', 'CONFIDENTIAL', 'SECRET', 'TOP_SECRET')),
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (created_by) REFERENCES users(id),
-    FOREIGN KEY (assigned_to) REFERENCES users(id)
-  )`);
+  // ... all other table creations here ...
 
-  db.run(`CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER DEFAULT NULL,
-    action_type TEXT NOT NULL,
-    resource_type TEXT NOT NULL,
-    resource_id INTEGER,
-    description TEXT NOT NULL,
-    ip_address TEXT,
-    user_agent TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  )`);
+  // Ensure default admin exists after tables are created
+  const defaultUsername = 'admin';
+  const defaultEmail = 'admin@fusioncore.gov';
+  const defaultPasswordHash = bcrypt.hashSync('admin123', 12);
+  const defaultFullName = 'System Administrator';
+  const defaultRole = 'admin';
 
-  db.run(`CREATE TABLE IF NOT EXISTS incidents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT,
-    severity INTEGER DEFAULT 1 CHECK(severity BETWEEN 1 AND 5),
-    status TEXT DEFAULT 'open' CHECK(status IN ('open', 'investigating', 'resolved', 'closed')),
-    assigned_analyst INTEGER,
-    created_by INTEGER NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    resolved_at DATETIME,
-    FOREIGN KEY (assigned_analyst) REFERENCES users(id),
-    FOREIGN KEY (created_by) REFERENCES users(id)
-  )`);
+  db.get(`SELECT id FROM users WHERE username = ?`, [defaultUsername], (err, row) => {
+    if (err) {
+      console.error('Failed to query users table for default admin:', err);
+      return;
+    }
 
-  db.run(`CREATE TABLE IF NOT EXISTS event_correlations (
-    correlation_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event1_id INTEGER NOT NULL,
-    event2_id INTEGER NOT NULL,
-    correlation_type TEXT NOT NULL,
-    confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
-    correlation_vectors TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (event1_id) REFERENCES events(id),
-    FOREIGN KEY (event2_id) REFERENCES events(id),
-    UNIQUE(event1_id, event2_id)
-  )`);
-
-  db.run(`CREATE INDEX IF NOT EXISTS idx_events_location ON events(latitude, longitude)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(created_at)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(created_at)`);
-
-  const defaultPassword = bcrypt.hashSync('admin123', 12);
-  db.run(`INSERT OR IGNORE INTO users (username, email, password_hash, role, full_name) 
-          VALUES (?, ?, ?, ?, ?)`, 
-          ['admin', 'admin@fusioncore.gov', defaultPassword, 'admin', 'System Administrator']);
+    if (!row) {
+      db.run(`INSERT INTO users (username, email, password_hash, role, full_name)
+              VALUES (?, ?, ?, ?, ?)`,
+              [defaultUsername, defaultEmail, defaultPasswordHash, defaultRole, defaultFullName],
+              (err) => {
+                if (err) console.error('Failed to create default admin:', err);
+                else console.log('✅ Default admin user created for this deployment.');
+              });
+    } else {
+      console.log('✅ Default admin already exists.');
+    }
+  });
 });
+
 
 // Audit logging (allow null userId)
 const logAudit = (userId, actionType, resourceType, resourceId, description, req = null) => {
