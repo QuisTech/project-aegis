@@ -365,6 +365,25 @@ app.post('/api/users', authenticateToken, requireRole(['admin','supervisor']), a
   }
 });
 
+// Add this route with the other routes (around line 350-360)
+app.post('/api/fix-schema', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    console.log('🔧 Fixing database schema...');
+    
+    await pool.query(`
+      ALTER TABLE events ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id);
+      UPDATE events SET created_by = 1 WHERE created_by IS NULL;
+      ALTER TABLE events ALTER COLUMN created_by SET NOT NULL;
+    `);
+    
+    console.log('✅ Schema fixed successfully');
+    res.json({ message: 'Schema fixed successfully' });
+  } catch (err) {
+    console.error('❌ Schema fix error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Create event
 app.post('/api/events', authenticateToken, async (req, res) => {
   const { event_type, description, latitude, longitude, source_id, confidence, priority, classification } = req.body;
