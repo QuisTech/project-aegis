@@ -6,6 +6,8 @@ const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 
@@ -34,59 +36,119 @@ const apiLimiter = rateLimit({
 app.use('/api/auth', authLimiter);
 app.use('/api/', apiLimiter);
 
-// Database
-// Updated code for Render
-const dbPath = process.env.DB_PATH || '/tmp/aegis_enterprise.db';
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) console.error('Failed to open database:', err);
-  else console.log('✅ SQLite DB opened at', dbPath);
-});
-
-
-db.serialize(() => {
-  // Existing table creation code
-  db.run(`CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    email TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('analyst', 'supervisor', 'admin')),
-    full_name TEXT NOT NULL,
-    is_active INTEGER DEFAULT 1,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    last_login DATETIME,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
-
-  // ... all other table creations here ...
-
-  // Ensure default admin exists after tables are created
-  const defaultUsername = 'admin';
-  const defaultEmail = 'admin@fusioncore.gov';
-  const defaultPasswordHash = bcrypt.hashSync('admin123', 12);
-  const defaultFullName = 'System Administrator';
-  const defaultRole = 'admin';
-
-  db.get(`SELECT id FROM users WHERE username = ?`, [defaultUsername], (err, row) => {
-    if (err) {
-      console.error('Failed to query users table for default admin:', err);
-      return;
+// Database Configuration
+function getDatabasePath() {
+  // Use environment variable if set
+  if (process.env.DB_PATH) {
+    return process.env.DB_PATH;
+  }
+  
+  // For production environments (Render, Vercel, etc.)
+  if (process.env.NODE_ENV === 'production') {
+    // Try different writable directories
+    const possiblePaths = [
+      '/tmp/aegis_enterprise.db',
+      '/var/tmp/aegis_enterprise.db',
+      './aegis_enterprise.db'
+    ];
+    
+    for (const dbPath of possiblePaths) {
+      try {
+        const dir = path.dirname(dbPath);
+        // Try to create directory if it doesn't exist
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        // Test if we can write to this location
+        fs.accessSync(dir, fs.constants.W_OK);
+        console.log(`✅ Using database path: ${dbPath}`);
+        return dbPath;
+      } catch (error) {
+        console.log(`❌ Cannot use path ${dbPath}: ${error.message}`);
+        continue;
+      }
     }
+  }
+  
+  // Default local development path
+  return './backend/aegis_enterprise.db';
+}
 
-    if (!row) {
-      db.run(`INSERT INTO users (username, email, password_hash, role, full_name)
-              VALUES (?, ?, ?, ?, ?)`,
-              [defaultUsername, defaultEmail, defaultPasswordHash, defaultRole, defaultFullName],
-              (err) => {
-                if (err) console.error('Failed to create default admin:', err);
-                else console.log('✅ Default admin user created for this deployment.');
-              });
+const dbPath = getDatabasePath();
+console.log(`📁 Final database path: ${dbPath}`);
+
+// Initialize database with error handling and retry
+function initializeDatabase() {
+  const db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+      console.error('❌ Failed to open database:', err.message);
+      console.log('🔄 Retrying with in-memory database as fallback...');
+      
+      // Fallback to in-memory database
+      const fallbackDb = new sqlite3.Database(':memory:', (fallbackErr) => {
+        if (fallbackErr) {
+          console.error('❌ Critical: Cannot open any database:', fallbackErr.message);
+          process.exit(1);
+        }
+        console.log('✅ Using in-memory database as fallback');
+        setupDatabase(fallbackDb);
+      });
+      return fallbackDb;
     } else {
-      console.log('✅ Default admin already exists.');
+      console.log('✅ SQLite DB opened successfully at:', dbPath);
+      setupDatabase(db);
     }
   });
-});
+  return db;
+}
 
+function setupDatabase(database) {
+  database.serialize(() => {
+    // Existing table creation code
+    database.run(`CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('analyst', 'supervisor', 'admin')),
+      full_name TEXT NOT NULL,
+      is_active INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_login DATETIME,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    // ... all other table creations here ...
+
+    // Ensure default admin exists after tables are created
+    const defaultUsername = 'admin';
+    const defaultEmail = 'admin@fusioncore.gov';
+    const defaultPasswordHash = bcrypt.hashSync('admin123', 12);
+    const defaultFullName = 'System Administrator';
+    const defaultRole = 'admin';
+
+    database.get(`SELECT id FROM users WHERE username = ?`, [defaultUsername], (err, row) => {
+      if (err) {
+        console.error('Failed to query users table for default admin:', err);
+        return;
+      }
+
+      if (!row) {
+        database.run(`INSERT INTO users (username, email, password_hash, role, full_name)
+                VALUES (?, ?, ?, ?, ?)`,
+                [defaultUsername, defaultEmail, defaultPasswordHash, defaultRole, defaultFullName],
+                (err) => {
+                  if (err) console.error('Failed to create default admin:', err);
+                  else console.log('✅ Default admin user created for this deployment.');
+                });
+      } else {
+        console.log('✅ Default admin already exists.');
+      }
+    });
+  });
+}
+
+const db = initializeDatabase();
 
 // Audit logging (allow null userId)
 const logAudit = (userId, actionType, resourceType, resourceId, description, req = null) => {
@@ -135,21 +197,35 @@ const requireRole = (roles) => {
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
 
-  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+  console.log(`🔐 Login attempt for user: ${username}`);
+  
+  if (!username || !password) {
+    console.log('❌ Missing username or password');
+    return res.status(400).json({ error: 'Username and password required' });
+  }
 
   db.get('SELECT * FROM users WHERE username = ? AND is_active = 1', [username], async (err, user) => {
-    if (err) return res.status(500).json({ error: 'Internal server error' });
+    if (err) {
+      console.error('❌ Database error during login:', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
 
     if (!user) {
+      console.log(`❌ User not found: ${username}`);
       logAudit(null, 'FAILED_LOGIN', 'USER', null, `Failed login attempt for username: ${username}`, req);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    console.log(`✅ User found: ${user.username}, role: ${user.role}`);
+
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) {
+      console.log(`❌ Invalid password for user: ${user.username}`);
       logAudit(user.id, 'FAILED_LOGIN', 'USER', null, `Failed login attempt for user: ${user.username}`, req);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+
+    console.log(`✅ Password valid for user: ${user.username}`);
 
     db.run('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', [user.id]);
 
@@ -161,6 +237,8 @@ app.post('/api/auth/login', async (req, res) => {
 
     logAudit(user.id, 'LOGIN', 'USER', user.id, `User ${user.username} logged in successfully`, req);
 
+    console.log(`🎉 Successful login for: ${user.username}`);
+    
     res.json({
       token,
       user: {
