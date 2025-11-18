@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Use environment variable with fallback for local development
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5001/api';
+const API_BASE = process.env.REACT_APP_API_URL || 'https://project-aegis-btw0.onrender.com';
 
 console.log('Auth API Base URL:', API_BASE); // Debug log
 
