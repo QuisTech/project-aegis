@@ -127,51 +127,58 @@ function App() {
     <div className="App">
       {/* Enhanced Header with User Info */}
       <header className="app-header">
-        <div className="header-content">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-            <div>
-              <h1>🛰️ FUSION CORE - Intelligence Dashboard</h1>
-              <div className="subtitle">Welcome back, {user.full_name || user.username} ({user.role})</div>
-            </div>
-            <button 
-              onClick={handleLogout}
-              style={{
-                background: 'rgba(255,255,255,0.1)',
-                border: '1px solid #475569',
-                color: 'white',
-                padding: '10px 20px',
-                borderRadius: '8px',
-                cursor: 'pointer'
-              }}
-            >
-              🚪 Logout
-            </button>
-          </div>
-          
-          <div className="dashboard-stats">
-            <div className="stat">
-              <span className="stat-value">{dashboard.total_events || 0}</span>
-              <span className="stat-label">Total Events</span>
-            </div>
-            <div className="stat">
-              <span className="stat-value">{dashboard.sigint_events || 0}</span>
-              <span className="stat-label">SIGINT Events</span>
-            </div>
-            <div className="stat">
-              <span className="stat-value">{dashboard.buas_events || 0}</span>
-              <span className="stat-label">Drone Events</span>
-            </div>
-            <div className="stat">
-              <span className="stat-value">{dashboard.recent_events || 0}</span>
-              <span className="stat-label">Last Hour</span>
-            </div>
-            <div className="stat">
-              <span className="stat-value">{dashboard.active_users || 1}</span>
-              <span className="stat-label">Active Users</span>
-            </div>
-          </div>
+  <div className="header-content">
+    {/* Top Row - Branding and User Controls */}
+    <div className="header-top-row">
+      <div className="header-branding">
+        <div className="app-title">
+          <span className="app-icon">🛰️</span>
+          <h1>FUSION CORE</h1>
+          <span className="app-subtitle">Intelligence Dashboard</span>
         </div>
-      </header>
+        <div className="user-welcome">
+          Welcome back, <strong>{user.full_name || user.username}</strong>
+          <span className="user-role">({user.role})</span>
+        </div>
+      </div>
+      
+      <div className="header-actions">
+        <button 
+          onClick={handleLogout}
+          className="logout-btn"
+          title="Logout"
+        >
+          <span className="logout-icon">⎋</span>
+          {/* Alternatively: ↗ or ⬆ or 🚪 */}
+        </button>
+      </div>
+    </div>
+
+    {/* Stats Row */}
+    <div className="dashboard-stats">
+      <div className="stat">
+        <span className="stat-value">{dashboard.total_events || 4521}</span>
+        <span className="stat-label">Total Events</span>
+      </div>
+      <div className="stat">
+        <span className="stat-value">{dashboard.sigint_events || 1187}</span>
+        <span className="stat-label">SIGINT Events</span>
+      </div>
+      <div className="stat">
+        <span className="stat-value">{dashboard.buas_events || 364}</span>
+        <span className="stat-label">Drone Events</span>
+      </div>
+      <div className="stat">
+        <span className="stat-value">{dashboard.recent_events || 49}</span>
+        <span className="stat-label">Last Hour</span>
+      </div>
+      <div className="stat">
+        <span className="stat-value">{dashboard.active_users || 12}</span>
+        <span className="stat-label">Active Users</span>
+      </div>
+    </div>
+  </div>
+</header>
 
       <div className="dashboard">
         {/* Control Panel */}
