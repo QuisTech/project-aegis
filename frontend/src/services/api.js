@@ -38,10 +38,7 @@ export const api = {
   auth: {
     login: (credentials) => apiClient.post('/api/auth/login', credentials),
   },
-  getEvents: async (params) => {
-    const response = await apiClient.get('/api/events', { params });
-    return { data: response.data };
-  },
+  getEvents: (params) => apiClient.get('/api/events', { params }),
   createEvent: (eventData) => apiClient.post('/api/events', eventData),
   getDashboard: () => apiClient.get('/api/dashboard'),
   getCorrelations: () => apiClient.get('/api/correlations'),
